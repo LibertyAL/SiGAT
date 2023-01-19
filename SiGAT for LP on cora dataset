@@ -1,0 +1,305 @@
+import csv
+import random
+import numpy as np
+import torch as t
+import torch.nn as nn
+import torch.nn.functional as F
+from time import time
+from torch.autograd import Variable
+import scipy.sparse as sp
+import matplotlib.pyplot as plt
+import networkx as nx
+#================================================ 一、数据处理 ==============================================================
+start2 = time()
+data = []
+
+
+with open("cora.cites") as file:  
+    reader = csv.reader(file)
+    # head1 = next(reader)
+    # head = next(reader)
+    for row in reader:
+        # print (row[0])
+        data.append(row[0])
+data1 = []
+for i in data:
+    i = i.strip(' ')  
+    i = i.split('\t')
+    data1.append(i)
+    
+edges = []  
+nodes = []
+for i in data1:
+    x1 = int(i[0])
+    x2 = int(i[1])
+    # print(x1,x2)
+    x3 = tuple((x1, x2))
+    edges.append(x3)
+    nodes.append(x1)
+    nodes.append(x2)
+    nodes_ = set(nodes)  
+    
+dic = {}
+nodes1 = []
+z = 0
+for i in nodes_:
+    dic[i] = z
+    nodes1.append(z)
+    z = z + 1
+print(len(nodes1))  
+
+edges_ = []
+for i in edges:
+    x11 = dic[i[0]]
+    x22 = dic[i[1]]
+    edges_.append(tuple((x11, x22)))
+print(len(edges_))  
+
+#adj --------------------------------------------------------------------------------------------
+adj = np.zeros((len(nodes1), len(nodes1)))  
+for i in edges_:
+    x=i[0]
+    y=i[1]
+    adj[x][y]=adj[y][x]=1
+adj =adj+ np.eye(adj.shape[0])
+adj[adj>=1]=1
+
+#--------------------------------------------------------------------------------------------
+neg_edges1=[]
+for i in range(9999999999):
+    n1=random.choice(nodes1)    
+    n2=random.choice(nodes1)
+    edge_neg=tuple((n1,n2))
+    if  n1<n2 and edge_neg not in edges_:
+        neg_edges1.append(edge_neg)
+        if len(set(neg_edges1))==len(edges_):
+            break
+random.shuffle(neg_edges1)
+neg_edges=list(set(neg_edges1))
+
+train_size = int(0.7 * len(edges_))
+test_size = len(edges_) - train_size
+train_pos_edges = random.sample(edges_, train_size)  
+test_pos_edges = [edge for edge in edges_ if edge not in train_pos_edges]
+  
+random.shuffle(neg_edges)
+train_neg_edges=neg_edges[:train_size]
+test_neg_edges=neg_edges[train_size:]
+
+train_data = train_pos_edges + train_neg_edges
+# print('train_date',len(train_data))
+test_data = test_pos_edges + test_neg_edges
+--------------------------------------------------------------------------
+def link_labels(pos_edge, neg_edge):
+    num_links = len(pos_edge) + len(neg_edge)
+    link_labels = t.zeros(num_links, dtype=t.float)
+    link_labels[:len(pos_edge)] = 1.
+    return link_labels
+train_labels = link_labels(train_pos_edges, train_neg_edges)
+test_labels = link_labels(test_pos_edges, test_neg_edges)
+
+def sumdot(self, another):
+    """向量点乘，返回结果标量"""  ##Python中的续行符是反斜杠(\),它可以将一行代码分成多行来写,便于代码的编写和阅读,使用方式是在行尾加上反斜杠(\),注意反斜杠后面不能加空格,必须直接换行.
+    assert len(self) == len(another), \
+        "Error in dot product. Length of vectors must be same."  # 断言，如果不满足条件，直接返回错误
+    return sum(a * b for a, b in zip(self, another))
+#------------------------------------------------------------------------------------------------------------
+import torch as t
+from torch import nn
+from labml_helpers.module import Module
+from labml_nn.graphs.gat import GraphAttentionLayer
+
+class GAT(Module):
+    def __init__(self, in_features: int, n_hidden: int, n_classes: int, n_heads: int, dropout: float):
+       
+        super().__init__()
+        # First graph attention layer where we concatenate the heads
+        self.layer1 = GraphAttentionLayer(in_features, n_hidden, n_heads, is_concat=True, dropout=dropout)
+        # Activation function after first graph attention layer
+        self.activation = nn.ELU()
+        # Final graph attention layer where we average the heads
+        self.output = GraphAttentionLayer(n_hidden, n_classes, 1, is_concat=False, dropout=dropout)
+        # Dropout
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: t.Tensor, adj_mat: t.Tensor):
+        """
+        * `x` is the features vectors of shape `[n_nodes, in_features]`
+        * `adj_mat` is the adjacency matrix of the form
+         `[n_nodes, n_nodes, n_heads]` or `[n_nodes, n_nodes, 1]`
+        """
+        # Apply dropout to the input
+        x = self.dropout(x)
+        # First graph attention layer
+        x = self.layer1(x, adj_mat)
+        # Activation function
+        x = self.activation(x)
+        # Dropout
+        x = self.dropout(x)
+        # Output layer (without activation) for logits
+        return self.output(x, adj_mat)
+
+#
+net=GAT(64,32,16,dropout=0,n_heads=8)
+inputs=t.randn(len(nodes1),64)    
+
+def CN(adj):
+    # adj += np.eye(adj.shape[0])
+    sim = adj.dot(adj)
+    return sim
+def Jaccavrd(adj):
+    Matrix_similarity = np.dot(adj, adj)
+    deg_row = sum(adj)
+    deg_row.shape = (deg_row.shape[0], 1)
+    deg_row_T = deg_row.T
+    tempdeg = deg_row + deg_row_T
+    temp = tempdeg - Matrix_similarity
+    Matrix_similarity = Matrix_similarity / temp
+    return Matrix_similarity
+
+adj_=CN(adj)
+DAD=np.reshape(adj_,(len(nodes1),len(nodes1),1))
+
+
+#------------------------------------------------- ----------------------------------------------------------
+AUC_avg=[]
+recall_avg=[]
+precision_avg=[]
+f1_avg=[]
+for i in range(10):
+    start1 = time()
+    cnt_wait = 0
+    best = 1e9
+    best_t = 0
+    optimizer = t.optim.Adam(params=net.parameters(), lr=0.01)
+    start3 = time()
+    for epoch in range(100):    
+        start = time()
+
+        optimizer.zero_grad()
+        outputs = net.forward(t.Tensor(inputs),t.Tensor(DAD))
+
+        X_train = []
+        for i in train_data:
+            u = i[0]
+            v = i[1]
+            x2=sumdot(outputs[u],outputs[v])
+            X_train.append(x2)
+
+        input = t.stack(X_train) 
+        loss=F.binary_cross_entropy_with_logits(input,train_labels)
+        loss.backward()
+        optimizer.step()
+
+        end = time()
+
+        print('\nEpoch %d | Loss: %.4f' % (epoch, loss.item()))
+        print('Running time: %s Seconds' % (end - start))
+        if loss<best:
+            best = loss
+            best_t = epoch
+            cnt_wait = 0
+            t.save(net.state_dict(), 'best.pkl')  
+        else:
+            cnt_wait += 1
+        if cnt_wait == 20:
+            print('Early stopping!')
+            break
+
+    print('Loading {}th epoch'.format(best_t))
+    end3 = time()
+    print('Running time: %s Seconds' % (end3 - start3))
+
+#================================================ ==================================================
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.metrics import roc_auc_score, precision_score, f1_score, recall_score
+
+    auc_ = [] 
+    recall = []
+    pre = []
+    f1 = []
+    for epoch in range(10):
+        start = time()
+        #
+        net.load_state_dict(t.load('best.pkl'))  # 
+        outputs = net(t.Tensor(inputs), t.Tensor(DAD))
+        outputs=outputs.sigmoid()   # 
+        # outputs = net(t.Tensor(inputs), t.Tensor(adj),t.Tensor(C))
+       # 
+        train_pos_edges = random.sample(edges_, train_size)  # 
+        test_pos_edges = [edge for edge in edges_ if edge not in train_pos_edges]
+
+        random.shuffle(neg_edges)
+        train_neg_edges = neg_edges[:train_size]
+        test_neg_edges = neg_edges[train_size:]
+
+        train_data = train_pos_edges + train_neg_edges
+        test_data = test_pos_edges + test_neg_edges
+
+        X1_Train = []
+        for i in train_data:
+            u = i[0]
+            v = i[1]
+            x = t.cat((outputs[u], outputs[v]),dim=0)
+            X1_Train.append(x.detach().numpy())
+
+        X2_test = []
+        for j in test_data:
+            u = j[0]
+            v = j[1]
+            x = t.cat((outputs[u], outputs[v]),dim=0) # 
+            X2_test.append(x.detach().numpy())
+
+        #
+        model = RandomForestClassifier(n_estimators=100, bootstrap=True,max_features="sqrt")
+        model.fit(X1_Train, train_labels.float())  # 
+        rf_probs = model.predict_proba(X2_test)[:, 1]  #  
+        probs = rf_probs.round()  #
+        roc_value = roc_auc_score(test_labels, probs)  # 
+        recall_score_ = recall_score(test_labels, probs)
+        precision_score_ = precision_score(test_labels, probs)
+        f1_score_ = f1_score(test_labels, probs)
+
+        auc_.append(roc_value)  # 
+        print("AUC:", auc_)
+        a1 = np.mean(auc_)  # 可以
+        recall.append(recall_score_)
+        print("Recall:", recall)
+        a2 = np.mean(recall)
+        pre.append(precision_score_)
+        print("precision：", pre)
+        a3 = np.mean(pre)
+        f1.append(f1_score_)
+        print("f1：", f1)
+        a4 = np.mean(f1)
+        end = time()
+
+        print('\nEpoch %d | AUC: %.4f | recall: %.4f| Precision: %.4f| F1: %.4f' % (
+        epoch, a1.item(), a2.item(), a3.item(), a4.item()))
+        print('Running time: %s Seconds' % (end - start))
+    AUC_avg.append(a1)
+    print("AUC:",AUC_avg)
+    meanauc=np.mean(AUC_avg)
+    print("AUC：",meanauc)
+    print('=======================================')
+    recall_avg.append(a2)
+    print("Recall:", recall_avg)
+    meanrecall = np.mean(recall_avg)
+    print("recall", meanrecall)
+    print('=======================================')
+    precision_avg.append(a3)
+    print("precision：", precision_avg)
+    meanpre = np.mean(precision_avg)
+    print("precision：", meanpre)
+    print('=======================================')
+    f1_avg.append(a4)
+    print("f1：", f1_avg)
+    meanf1 = np.mean(f1_avg)
+    print("f1：", meanf1)
+    print('=======================================')
+
+    end1 = time()
+    print('Running time: %s Seconds' % (end1 - start1))
+
+    end2 = time()
+    print('Running time: %s mins' % ((end2 - start2)/60))
